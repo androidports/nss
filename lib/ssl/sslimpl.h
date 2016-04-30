@@ -834,10 +834,6 @@ struct TLSExtensionDataStr {
     SECItem signedCertTimestamps;
 };
 
-typedef enum {
-    sni_nametype_hostname
-} SNINameType;
-
 typedef SECStatus (*sslRestartTarget)(sslSocket *);
 
 /*
