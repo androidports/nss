@@ -34,6 +34,7 @@
 #include "pkitm.h"
 #include "pkistore.h" /* to remove temp cert */
 #include "devt.h"
+#include "ckhelper.h"
 
 extern const NSSError NSS_ERROR_NOT_FOUND;
 extern const NSSError NSS_ERROR_INVALID_CERTIFICATE;
@@ -503,14 +504,212 @@ transfer_token_certs_to_collection(nssList *certList, NSSToken *token,
     nss_ZFreeIf(certs);
 }
 
-CERTCertificate *
-PK11_FindCertFromNickname(const char *nickname, void *wincx) 
+static void
+transfer_uri_certs_to_collection(nssList *certList, P11URI *URI,
+				 nssPKIObjectCollection *collection)
 {
+
+    NSSCertificate **certs;
+    PRUint32 i, count;
+    NSSToken **tokens, **tp;
+    PK11SlotInfo *slot;
+    CK_ATTRIBUTE_PTR id_attr;
+
+    id_attr = P11URI_GetAttribute(URI, CKA_ID);
+    count = nssList_Count(certList);
+    if (count == 0) {
+	return;
+    }
+    certs = nss_ZNEWARRAY(NULL, NSSCertificate *, count);
+    if (!certs) {
+	return;
+    }
+    nssList_GetArray(certList, (void **)certs, count);
+    for (i=0; i<count; i++) {
+	/*
+	 * Filter the subject matched certs based on the
+	 * CKA_ID from the URI
+	 */
+	if (id_attr && (id_attr->ulValueLen != certs[i]->id.size ||
+			memcmp(id_attr->pValue, certs[i]->id.data, certs[i]->id.size)))
+	    continue;
+	tokens = nssPKIObject_GetTokens(&certs[i]->object, NULL);
+	if (tokens) {
+	    for (tp = tokens; *tp; tp++) {
+		slot = (*tp)->pk11slot;
+		if (P11URI_MatchTokenInfo(URI, &(slot->tokenInfo)) == 1) {
+		    nssPKIObjectCollection_AddObject(collection,
+						     (nssPKIObject *)certs[i]);
+		    break;
+		}
+	    }
+	    nssTokenArray_Destroy(tokens);
+	}
+	CERT_DestroyCertificate(STAN_GetCERTCertificateOrRelease(certs[i]));
+    }
+    nss_ZFreeIf(certs);
+}
+
+static NSSCertificate **
+find_certs_from_uri(const char *uri, void *wincx)
+{
+    P11URI *p11Uri;
+    CK_ATTRIBUTE_PTR attributes;
+    CK_ATTRIBUTE_PTR finalattributes;
+    CK_ATTRIBUTE_PTR label;
+    CK_ULONG numattrs;
+    PK11SlotInfo *slotinfo;
+    nssCryptokiObject **instances;
     PRStatus status;
-    CERTCertificate *rvCert = NULL;
+    nssPKIObjectCollection *collection = NULL;
+    NSSTrustDomain *defaultTD = STAN_GetDefaultTrustDomain();
+    NSSCertificate **certs = NULL;
+    nssList *certList = NULL;
+    SECStatus rv;
+    CK_OBJECT_CLASS class = CKO_CERTIFICATE;
+    CK_ATTRIBUTE type = {CKA_CLASS, &class, sizeof(class) };
+    static const CK_BBOOL s_true = CK_TRUE;
+    NSSToken **tokens, **tok;
+
+    p11Uri = P11URI_New();
+    if (!p11Uri) {
+	return NULL;
+    }
+
+    if (P11URI_Parse(uri, P11URI_FOR_OBJECT_ON_TOKEN, p11Uri) != SECSuccess) {
+	P11URI_Free(p11Uri);
+	return NULL;
+    }
+    if (P11URI_SetAttribute(p11Uri, &type) != SECSuccess) {
+	P11URI_Free(p11Uri);
+	return NULL;
+    }
+    label = P11URI_GetAttribute(p11Uri, CKA_LABEL);
+    collection = nssCertificateCollection_Create(defaultTD, NULL);
+    if (!collection) {
+	P11URI_Free(p11Uri);
+	return NULL;
+    }
+    certList = nssList_Create(NULL, PR_FALSE);
+    if (!certList) {
+	nssPKIObjectCollection_Destroy(collection);
+	P11URI_Free(p11Uri);
+	return NULL;
+    }
+    if (label) {
+	/* The P11URI code helpfully guarantees that the CKA_LABEL
+	 * will be NUL-terminated */
+	(void)nssTrustDomain_GetCertsForNicknameFromCache(defaultTD,
+							  (const char *)label->pValue,
+							  certList);
+    } else {
+	(void)nssTrustDomain_GetCertsFromCache(defaultTD, certList);
+    }
+
+    transfer_uri_certs_to_collection(certList, p11Uri, collection);
+
+
+    /* add the CK_TOKEN attribute manually */
+    attributes = P11URI_GetAttributes(p11Uri,&numattrs);
+    finalattributes = PORT_Alloc(sizeof(CK_ATTRIBUTE)*(numattrs+1));
+    if (!finalattributes) {
+	nssPKIObjectCollection_Destroy(collection);
+	nssList_Destroy(certList);
+	P11URI_Free(p11Uri);
+	return NULL;
+    }
+    memcpy(finalattributes, attributes, sizeof(CK_ATTRIBUTE)*(numattrs));
+    finalattributes[numattrs].type = CKA_TOKEN;
+    finalattributes[numattrs].pValue = (void *)&s_true;
+    finalattributes[numattrs].ulValueLen = sizeof(s_true);
+
+    tokens = NSSTrustDomain_FindTokensByURI(defaultTD, p11Uri);
+    for (tok = tokens; tok && *tok; tok++) {
+	if (nssToken_IsPresent(*tok)) {
+	    slotinfo = (*tok)->pk11slot;
+
+	    rv = pk11_AuthenticateUnfriendly(slotinfo, PR_TRUE, wincx);
+	    if (rv != SECSuccess) {
+		continue;
+	    }
+	    instances = nssToken_FindObjectsByTemplate(*tok, NULL,
+						       finalattributes,
+						       numattrs+1,
+						       0, &status);
+	    nssPKIObjectCollection_AddInstances(collection, instances, 0);
+	}
+	nssToken_Destroy(*tok);
+    }
+    nss_ZFreeIf(tokens);
+    nssList_Destroy(certList);
+    certs = nssPKIObjectCollection_GetCertificates(collection, NULL, 0, NULL);
+    nssPKIObjectCollection_Destroy(collection);
+    P11URI_Free(p11Uri);
+    PORT_Free(finalattributes);
+    return certs;
+}
+
+
+CERTCertificate *
+PK11_FindCertFromURI(const char *uri, void *wincx)
+{
+    static const NSSUsage usage = {PR_TRUE /* ... */ };
     NSSCertificate *cert = NULL;
     NSSCertificate **certs = NULL;
-    static const NSSUsage usage = {PR_TRUE /* ... */ };
+    CERTCertificate *rvCert = NULL;
+
+    certs = find_certs_from_uri(uri, wincx);
+    if (certs) {
+	cert = nssCertificateArray_FindBestCertificate(certs, NULL,
+						       &usage, NULL);
+	if (cert) {
+	    rvCert = STAN_GetCERTCertificateOrRelease(cert);
+	}
+	nssCertificateArray_Destroy(certs);
+    }
+    return rvCert;
+}
+
+CERTCertList *
+PK11_FindCertsFromURI(const char *uri, void *wincx) 
+{
+    int i;
+    CERTCertList *certList = NULL;
+    NSSCertificate **foundCerts;
+    NSSCertificate *c;
+
+    foundCerts = find_certs_from_uri(uri, wincx);
+    if (foundCerts) {
+	PRTime now = PR_Now();
+	certList = CERT_NewCertList();
+	for (i=0, c = *foundCerts; c; c = foundCerts[++i]) {
+	    if (certList) {
+		CERTCertificate *certCert = STAN_GetCERTCertificateOrRelease(c);
+		/* c may be invalid after this, don't reference it */
+		if (certCert) {
+		    /* CERT_AddCertToListSorted adopts certCert  */
+		    CERT_AddCertToListSorted(certList, certCert,
+				CERT_SortCBValidity, &now);
+		}
+	    } else {
+		nssCertificate_Destroy(c);
+	    }
+	}
+	if (certList && CERT_LIST_HEAD(certList) == NULL) {
+	    CERT_DestroyCertList(certList);
+	    certList = NULL;
+	}
+	/* all the certs have been adopted or freed, free the  raw array */
+	nss_ZFreeIf(foundCerts);
+    }
+    return certList;
+}
+
+static NSSCertificate **
+find_certs_from_nickname(const char *nickname, void *wincx)
+{
+    PRStatus status;
+    NSSCertificate **certs = NULL;
     NSSToken *token;
     NSSTrustDomain *defaultTD = STAN_GetDefaultTrustDomain();
     PK11SlotInfo *slot = NULL;
@@ -519,6 +718,11 @@ PK11_FindCertFromNickname(const char *nickname, void *wincx)
     char *delimit = NULL;
     char *tokenName;
 
+    if (!strncmp(nickname, "pkcs11:", 7)) {
+	certs = find_certs_from_uri(nickname, wincx);
+	if (certs)
+	    return certs;
+    }
     nickCopy = PORT_Strdup(nickname);
     if (!nickCopy) {
         /* error code is set */
@@ -538,7 +742,7 @@ PK11_FindCertFromNickname(const char *nickname, void *wincx)
 	*delimit = ':';
     } else {
 	slot = PK11_GetInternalKeySlot();
-	token = PK11Slot_GetNSSToken(slot);
+	token = nssToken_AddRef(PK11Slot_GetNSSToken(slot));
     }
     if (token) {
 	nssList *certList;
@@ -597,27 +801,37 @@ PK11_FindCertFromNickname(const char *nickname, void *wincx)
 	certs = nssPKIObjectCollection_GetCertificates(collection, 
 	                                               NULL, 0, NULL);
 	nssPKIObjectCollection_Destroy(collection);
-	if (certs) {
-	    cert = nssCertificateArray_FindBestCertificate(certs, NULL, 
-	                                                   &usage, NULL);
-	    if (cert) {
-		rvCert = STAN_GetCERTCertificateOrRelease(cert);
-	    }
-	    nssCertificateArray_Destroy(certs);
-	}
 	nssList_Destroy(certList);
     }
+ loser:
+    if (token) {
+	nssToken_Destroy(token);
+    }
     if (slot) {
 	PK11_FreeSlot(slot);
     }
     if (nickCopy) PORT_Free(nickCopy);
+    return certs;
+}
+
+CERTCertificate *
+PK11_FindCertFromNickname(const char *nickname, void *wincx) 
+{
+    static const NSSUsage usage = {PR_TRUE /* ... */ };
+    NSSCertificate *cert = NULL;
+    NSSCertificate **certs = NULL;
+    CERTCertificate *rvCert = NULL;
+
+    certs = find_certs_from_nickname(nickname, wincx);
+    if (certs) {
+	cert = nssCertificateArray_FindBestCertificate(certs, NULL, 
+						       &usage, NULL);
+	if (cert) {
+	    rvCert = STAN_GetCERTCertificateOrRelease(cert);
+	}
+	nssCertificateArray_Destroy(certs);
+    }
     return rvCert;
-loser:
-    if (slot) {
-	PK11_FreeSlot(slot);
-    }
-    if (nickCopy) PORT_Free(nickCopy);
-    return NULL;
 }
 
 /* Traverse slots callback */
@@ -695,112 +909,15 @@ PK11_FindCertsFromEmailAddress(const char *email, void *wincx)
     return cbparam.certList;
 }
 
-
 CERTCertList *
 PK11_FindCertsFromNickname(const char *nickname, void *wincx) 
 {
-    char *nickCopy;
-    char *delimit = NULL;
-    char *tokenName;
     int i;
     CERTCertList *certList = NULL;
-    nssPKIObjectCollection *collection = NULL;
-    NSSCertificate **foundCerts = NULL;
-    NSSTrustDomain *defaultTD = STAN_GetDefaultTrustDomain();
+    NSSCertificate **foundCerts;
     NSSCertificate *c;
-    NSSToken *token;
-    PK11SlotInfo *slot;
-    SECStatus rv;
 
-    nickCopy = PORT_Strdup(nickname);
-    if (!nickCopy) {
-        /* error code is set */
-        return NULL;
-    }
-    if ((delimit = PORT_Strchr(nickCopy,':')) != NULL) {
-	tokenName = nickCopy;
-	nickname = delimit + 1;
-	*delimit = '\0';
-	/* find token by name */
-	token = NSSTrustDomain_FindTokenByName(defaultTD, (NSSUTF8 *)tokenName);
-	if (token) {
-	    slot = PK11_ReferenceSlot(token->pk11slot);
-	} else {
-	    PORT_SetError(SEC_ERROR_NO_TOKEN);
-	    slot = NULL;
-	}
-	*delimit = ':';
-    } else {
-	slot = PK11_GetInternalKeySlot();
-	token = PK11Slot_GetNSSToken(slot);
-    }
-    if (token) {
-	PRStatus status;
-	nssList *nameList;
-	nssCryptokiObject **instances;
-	nssTokenSearchType tokenOnly = nssTokenSearchType_TokenOnly;
-   	rv = pk11_AuthenticateUnfriendly(slot, PR_TRUE, wincx);
-	if (rv != SECSuccess) {
-	    PK11_FreeSlot(slot);
-    	    if (nickCopy) PORT_Free(nickCopy);
-	    return NULL;
-	}
-	collection = nssCertificateCollection_Create(defaultTD, NULL);
-	if (!collection) {
-	    PK11_FreeSlot(slot);
-	    if (nickCopy) PORT_Free(nickCopy);
-	    return NULL;
-	}
-	nameList = nssList_Create(NULL, PR_FALSE);
-	if (!nameList) {
-	    PK11_FreeSlot(slot);
-	    if (nickCopy) PORT_Free(nickCopy);
-	    return NULL;
-	}
-	(void)nssTrustDomain_GetCertsForNicknameFromCache(defaultTD,
-	                                                  nickname, 
-	                                                  nameList);
-	transfer_token_certs_to_collection(nameList, token, collection);
-	instances = nssToken_FindCertificatesByNickname(token,
-	                                                NULL,
-	                                                nickname,
-	                                                tokenOnly,
-	                                                0,
-	                                                &status);
-	nssPKIObjectCollection_AddInstances(collection, instances, 0);
-	nss_ZFreeIf(instances);
-
-        /* if it wasn't found, repeat the process for email address */
-        if (nssPKIObjectCollection_Count(collection) == 0 &&
-            PORT_Strchr(nickname, '@') != NULL) 
-        {
-            char* lowercaseName = CERT_FixupEmailAddr(nickname);
-            if (lowercaseName) {
-                (void)nssTrustDomain_GetCertsForEmailAddressFromCache(defaultTD, 
-                                                                      lowercaseName, 
-                                                                      nameList);
-                transfer_token_certs_to_collection(nameList, token, collection);
-                instances = nssToken_FindCertificatesByEmail(token,
-                                                             NULL,
-                                                             lowercaseName,
-                                                             tokenOnly,
-                                                             0,
-                                                             &status);
-                nssPKIObjectCollection_AddInstances(collection, instances, 0);
-                nss_ZFreeIf(instances);
-                PORT_Free(lowercaseName);
-            }
-        }
-
-        nssList_Destroy(nameList);
-	foundCerts = nssPKIObjectCollection_GetCertificates(collection,
-	                                                    NULL, 0, NULL);
-	nssPKIObjectCollection_Destroy(collection);
-    }
-    if (slot) {
-	PK11_FreeSlot(slot);
-    }
-    if (nickCopy) PORT_Free(nickCopy);
+    foundCerts = find_certs_from_nickname(nickname, wincx);
     if (foundCerts) {
 	PRTime now = PR_Now();
 	certList = CERT_NewCertList();

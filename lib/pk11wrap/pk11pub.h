@@ -14,6 +14,7 @@
 #include "seccomon.h"
 #include "pkcs7t.h"
 #include "cmsreclist.h"
+#include "p11uri.h"
 
 /*
  * Exported PK11 wrap functions.
@@ -78,6 +79,7 @@ PRBool PK11_IsReadOnly(PK11SlotInfo *slot);
 PRBool PK11_IsInternal(PK11SlotInfo *slot);
 PRBool PK11_IsInternalKeySlot(PK11SlotInfo *slot);
 char * PK11_GetTokenName(PK11SlotInfo *slot);
+char * PK11_GetTokenURI(PK11SlotInfo *slot);
 char * PK11_GetSlotName(PK11SlotInfo *slot);
 PRBool PK11_NeedLogin(PK11SlotInfo *slot);
 PRBool PK11_IsFriendly(PK11SlotInfo *slot);
@@ -137,6 +139,7 @@ PK11TokenStatus PK11_WaitForTokenEvent(PK11SlotInfo *slot, PK11TokenEvent event,
 PRBool PK11_NeedPWInit(void);
 PRBool PK11_TokenExists(CK_MECHANISM_TYPE);
 SECStatus PK11_GetModInfo(SECMODModule *mod, CK_INFO *info);
+char *PK11_GetModuleURI(SECMODModule *mod);
 PRBool PK11_IsFIPS(void);
 SECMODModule *PK11_GetModule(PK11SlotInfo *slot);
 
@@ -649,6 +652,8 @@ SECStatus PK11_TraverseSlotCerts(
      SECStatus(* callback)(CERTCertificate*,SECItem *,void *),
                                                 void *arg, void *wincx);
 CERTCertificate * PK11_FindCertFromNickname(const char *nickname, void *wincx);
+CERTCertificate * PK11_FindCertFromURI(const char *uri, void *wincx);
+CERTCertList * PK11_FindCertsFromURI(const char *uri, void *wincx);
 CERTCertList * PK11_FindCertsFromEmailAddress(const char *email, void *wincx);
 CERTCertList * PK11_FindCertsFromNickname(const char *nickname, void *wincx);
 CERTCertificate *PK11_GetCertFromPrivateKey(SECKEYPrivateKey *privKey);
