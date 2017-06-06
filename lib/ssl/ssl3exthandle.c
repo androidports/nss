@@ -384,8 +384,6 @@ SECStatus
 ssl3_ServerHandleNextProtoNegoXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRUint16 ex_type,
                                   SECItem *data)
 {
-    PORT_Assert(ss->version < SSL_LIBRARY_VERSION_TLS_1_3);
-
     if (ss->firstHsDone || data->len != 0) {
         /* Clients MUST send an empty NPN extension, if any. */
         PORT_SetError(SSL_ERROR_NEXT_PROTOCOL_DATA_INVALID);
@@ -527,7 +525,6 @@ SECStatus
 ssl3_ClientHandleNextProtoNegoXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRUint16 ex_type,
                                   SECItem *data)
 {
-    PORT_Assert(ss->version < SSL_LIBRARY_VERSION_TLS_1_3);
     PORT_Assert(!ss->firstHsDone);
 
     if (ssl3_ExtensionNegotiated(ss, ssl_app_layer_protocol_xtn)) {
@@ -1266,8 +1263,6 @@ SECStatus
 ssl3_ClientHandleSessionTicketXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRUint16 ex_type,
                                   SECItem *data)
 {
-    PORT_Assert(ss->version < SSL_LIBRARY_VERSION_TLS_1_3);
-
     if (data->len != 0) {
         return SECSuccess; /* Ignore the extension. */
     }
@@ -1802,7 +1797,6 @@ SECStatus
 ssl3_ServerHandleSessionTicketXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRUint16 ex_type,
                                   SECItem *data)
 {
-    PORT_Assert(ss->version < SSL_LIBRARY_VERSION_TLS_1_3);
 
     /* Ignore the SessionTicket extension if processing is disabled. */
     if (!ss->opt.enableSessionTickets) {
@@ -1902,13 +1896,10 @@ ssl3_SendRenegotiationInfoXtn(
 
 /* This function runs in both the client and server.  */
 SECStatus
-ssl3_HandleRenegotiationInfoXtn(const sslSocket *ss, TLSExtensionData *xtnData,
-                                PRUint16 ex_type, SECItem *data)
+ssl3_HandleRenegotiationInfoXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRUint16 ex_type, SECItem *data)
 {
     SECStatus rv = SECSuccess;
     PRUint32 len = 0;
-
-    PORT_Assert(ss->version < SSL_LIBRARY_VERSION_TLS_1_3);
 
     if (ss->firstHsDone) {
         len = ss->sec.isServer ? ss->ssl3.hs.finishedBytes
@@ -2158,12 +2149,11 @@ ssl3_ServerHandleUseSRTPXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRUi
                                         ssl3_ServerSendUseSRTPXtn);
 }
 
-/* ssl3_HandleSigAlgsXtn handles the signature_algorithms extension from a
- * client.  In TLS 1.3, the client uses this to parse CertificateRequest
- * extensions.  See https://tools.ietf.org/html/rfc5246#section-7.4.1.4.1 */
+/* ssl3_ServerHandleSigAlgsXtn handles the signature_algorithms extension
+ * from a client.
+ * See https://tools.ietf.org/html/rfc5246#section-7.4.1.4.1 */
 SECStatus
-ssl3_HandleSigAlgsXtn(const sslSocket *ss, TLSExtensionData *xtnData,
-                      PRUint16 ex_type, SECItem *data)
+ssl3_ServerHandleSigAlgsXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRUint16 ex_type, SECItem *data)
 {
     SECStatus rv;
 
@@ -2172,15 +2162,15 @@ ssl3_HandleSigAlgsXtn(const sslSocket *ss, TLSExtensionData *xtnData,
         return SECSuccess;
     }
 
-    if (xtnData->sigSchemes) {
-        PORT_Free(xtnData->sigSchemes);
-        xtnData->sigSchemes = NULL;
+    if (xtnData->clientSigSchemes) {
+        PORT_Free(xtnData->clientSigSchemes);
+        xtnData->clientSigSchemes = NULL;
     }
     rv = ssl_ParseSignatureSchemes(ss, NULL,
-                                   &xtnData->sigSchemes,
-                                   &xtnData->numSigSchemes,
+                                   &xtnData->clientSigSchemes,
+                                   &xtnData->numClientSigScheme,
                                    &data->data, &data->len);
-    if (rv != SECSuccess || xtnData->numSigSchemes == 0) {
+    if (rv != SECSuccess || xtnData->numClientSigScheme == 0) {
         ssl3_ExtSendAlert(ss, alert_fatal, decode_error);
         PORT_SetError(SSL_ERROR_RX_MALFORMED_CLIENT_HELLO);
         return SECFailure;
@@ -2200,8 +2190,7 @@ ssl3_HandleSigAlgsXtn(const sslSocket *ss, TLSExtensionData *xtnData,
 /* ssl3_ClientSendSigAlgsXtn sends the signature_algorithm extension for TLS
  * 1.2 ClientHellos. */
 PRInt32
-ssl3_SendSigAlgsXtn(const sslSocket *ss, TLSExtensionData *xtnData,
-                    PRBool append, PRUint32 maxBytes)
+ssl3_ClientSendSigAlgsXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRBool append, PRUint32 maxBytes)
 {
     PRInt32 extension_length;
     PRUint8 buf[MAX_SIGNATURE_SCHEMES * 2];
@@ -2365,8 +2354,6 @@ SECStatus
 ssl3_HandleExtendedMasterSecretXtn(const sslSocket *ss, TLSExtensionData *xtnData, PRUint16 ex_type,
                                    SECItem *data)
 {
-    PORT_Assert(ss->version < SSL_LIBRARY_VERSION_TLS_1_3);
-
     if (ss->version < SSL_LIBRARY_VERSION_TLS_1_0) {
         return SECSuccess;
     }
@@ -2524,8 +2511,6 @@ ssl3_HandleSupportedPointFormatsXtn(const sslSocket *ss, TLSExtensionData *xtnDa
                                     SECItem *data)
 {
     int i;
-
-    PORT_Assert(ss->version < SSL_LIBRARY_VERSION_TLS_1_3);
 
     if (data->len < 2 || data->len > 255 || !data->data ||
         data->len != (unsigned int)data->data[0] + 1) {
