@@ -311,7 +311,6 @@ TEST_P(TlsConnectTls13, SendTooMuchEarlyData) {
   server_->Set0RttEnabled(true);
   ExpectResumption(RESUME_TICKET);
 
-  ExpectAlert(client_, kTlsAlertEndOfEarlyData);
   client_->Handshake();
   CheckEarlyDataLimit(client_, short_size);
 
@@ -365,7 +364,6 @@ TEST_P(TlsConnectTls13, ReceiveTooMuchEarlyData) {
   server_->Set0RttEnabled(true);
   ExpectResumption(RESUME_TICKET);
 
-  client_->ExpectSendAlert(kTlsAlertEndOfEarlyData);
   client_->Handshake();  // Send ClientHello
   CheckEarlyDataLimit(client_, limit);
 

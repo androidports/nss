@@ -259,10 +259,15 @@ class TlsExtensionFilter : public TlsHandshakeFilter {
   TlsExtensionFilter() : handshake_types_() {
     handshake_types_.insert(kTlsHandshakeClientHello);
     handshake_types_.insert(kTlsHandshakeServerHello);
+    handshake_types_.insert(kTlsHandshakeEncryptedExtensions);
   }
 
   TlsExtensionFilter(const std::set<uint8_t>& types)
       : handshake_types_(types) {}
+
+  void SetHandshakeTypes(const std::set<uint8_t>& types) {
+    handshake_types_ = types;
+  }
 
   static bool FindExtensions(TlsParser* parser, const HandshakeHeader& header);
 
@@ -409,6 +414,19 @@ class TlsLastByteDamager : public TlsHandshakeFilter {
 
  private:
   uint8_t type_;
+};
+
+class SelectedCipherSuiteReplacer : public TlsHandshakeFilter {
+ public:
+  SelectedCipherSuiteReplacer(uint16_t suite) : cipher_suite_(suite) {}
+
+ protected:
+  PacketFilter::Action FilterHandshake(const HandshakeHeader& header,
+                                       const DataBuffer& input,
+                                       DataBuffer* output) override;
+
+ private:
+  uint16_t cipher_suite_;
 };
 
 }  // namespace nss_test

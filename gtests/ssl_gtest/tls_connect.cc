@@ -89,6 +89,8 @@ std::string VersionString(uint16_t version) {
   switch (version) {
     case 0:
       return "(no version)";
+    case SSL_LIBRARY_VERSION_3_0:
+      return "1.0";
     case SSL_LIBRARY_VERSION_TLS_1_0:
       return "1.0";
     case SSL_LIBRARY_VERSION_TLS_1_1:
@@ -584,10 +586,6 @@ void TlsConnectTestBase::ZeroRttSendReceive(
     std::function<bool()> post_clienthello_check) {
   const char* k0RttData = "ABCDEF";
   const PRInt32 k0RttDataLen = static_cast<PRInt32>(strlen(k0RttData));
-
-  if (expect_writable && expect_readable) {
-    ExpectAlert(client_, kTlsAlertEndOfEarlyData);
-  }
 
   client_->Handshake();  // Send ClientHello.
   if (post_clienthello_check) {

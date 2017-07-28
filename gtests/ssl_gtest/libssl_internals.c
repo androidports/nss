@@ -136,7 +136,6 @@ PRBool SSLInt_CheckSecretsDestroyed(PRFileDesc *fd) {
   }
 
   CHECK_SECRET(currentSecret);
-  CHECK_SECRET(resumptionMasterSecret);
   CHECK_SECRET(dheSecret);
   CHECK_SECRET(clientEarlyTrafficSecret);
   CHECK_SECRET(clientHsTrafficSecret);
@@ -349,30 +348,6 @@ SSLCipherAlgorithm SSLInt_CipherSpecToAlgorithm(PRBool isServer,
 
 unsigned char *SSLInt_CipherSpecToIv(PRBool isServer, ssl3CipherSpec *spec) {
   return GetKeyingMaterial(isServer, spec)->write_iv;
-}
-
-SECStatus SSLInt_EnableShortHeaders(PRFileDesc *fd) {
-  sslSocket *ss;
-
-  ss = ssl_FindSocket(fd);
-  if (!ss) {
-    return SECFailure;
-  }
-
-  ss->opt.enableShortHeaders = PR_TRUE;
-  return SECSuccess;
-}
-
-SECStatus SSLInt_UsingShortHeaders(PRFileDesc *fd, PRBool *result) {
-  sslSocket *ss;
-
-  ss = ssl_FindSocket(fd);
-  if (!ss) {
-    return SECFailure;
-  }
-
-  *result = ss->ssl3.hs.shortHeaders;
-  return SECSuccess;
 }
 
 void SSLInt_SetTicketLifetime(uint32_t lifetime) {
