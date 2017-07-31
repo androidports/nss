@@ -73,7 +73,6 @@ TlsAgent::TlsAgent(const std::string& name, Role role,
       handshake_callback_(),
       auth_certificate_callback_(),
       sni_callback_(),
-      expect_short_headers_(false),
       skip_version_checks_(false) {
   memset(&info_, 0, sizeof(info_));
   memset(&csinfo_, 0, sizeof(csinfo_));
@@ -407,13 +406,6 @@ void TlsAgent::SetFallbackSCSVEnabled(bool en) {
   EXPECT_EQ(SECSuccess, rv);
 }
 
-void TlsAgent::SetShortHeadersEnabled() {
-  EXPECT_TRUE(EnsureTlsSetup());
-
-  SECStatus rv = SSLInt_EnableShortHeaders(ssl_fd());
-  EXPECT_EQ(SECSuccess, rv);
-}
-
 void TlsAgent::SetVersionRange(uint16_t minver, uint16_t maxver) {
   vrange_.min = minver;
   vrange_.max = maxver;
@@ -436,8 +428,6 @@ void TlsAgent::SetExpectedVersion(uint16_t version) {
 void TlsAgent::SetServerKeyBits(uint16_t bits) { server_key_bits_ = bits; }
 
 void TlsAgent::ExpectReadWriteError() { expect_readwrite_error_ = true; }
-
-void TlsAgent::ExpectShortHeaders() { expect_short_headers_ = true; }
 
 void TlsAgent::SkipVersionChecks() { skip_version_checks_ = true; }
 
@@ -622,12 +612,8 @@ void TlsAgent::CheckErrorCode(int32_t expected) const {
 }
 
 static uint8_t GetExpectedAlertLevel(uint8_t alert) {
-  switch (alert) {
-    case kTlsAlertCloseNotify:
-    case kTlsAlertEndOfEarlyData:
-      return kTlsAlertWarning;
-    default:
-      break;
+  if (alert == kTlsAlertCloseNotify) {
+    return kTlsAlertWarning;
   }
   return kTlsAlertFatal;
 }
@@ -755,20 +741,19 @@ void TlsAgent::Connected() {
 
   if (expected_version_ >= SSL_LIBRARY_VERSION_TLS_1_3) {
     PRInt32 cipherSuites = SSLInt_CountTls13CipherSpecs(ssl_fd());
-    // We use one ciphersuite in each direction, plus one that's kept around
-    // by DTLS for retransmission.
-    PRInt32 expected =
-        ((variant_ == ssl_variant_datagram) && (role_ == CLIENT)) ? 3 : 2;
+    // We use one ciphersuite in each direction.
+    PRInt32 expected = 2;
+    // For DTLS, the client retains the cipher spec for early data and the
+    // handshake so that it can retransmit EndOfEarlyData and its final flight.
+    if (variant_ == ssl_variant_datagram && role_ == CLIENT) {
+      expected = info_.earlyDataAccepted ? 4 : 3;
+    }
     EXPECT_EQ(expected, cipherSuites);
     if (expected != cipherSuites) {
       SSLInt_PrintTls13CipherSpecs(ssl_fd());
     }
   }
 
-  PRBool short_headers;
-  rv = SSLInt_UsingShortHeaders(ssl_fd(), &short_headers);
-  EXPECT_EQ(SECSuccess, rv);
-  EXPECT_EQ((PRBool)expect_short_headers_, short_headers);
   SetState(STATE_CONNECTED);
 }
 
