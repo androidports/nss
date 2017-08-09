@@ -89,6 +89,8 @@ std::string VersionString(uint16_t version) {
   switch (version) {
     case 0:
       return "(no version)";
+    case SSL_LIBRARY_VERSION_3_0:
+      return "1.0";
     case SSL_LIBRARY_VERSION_TLS_1_0:
       return "1.0";
     case SSL_LIBRARY_VERSION_TLS_1_1:
@@ -179,6 +181,7 @@ void TlsConnectTestBase::SetUp() {
   SSLInt_ClearSelfEncryptKey();
   SSLInt_SetTicketLifetime(30);
   SSLInt_SetMaxEarlyDataSize(1024);
+  SSL_SetupAntiReplay(1 * PR_USEC_PER_SEC, 1, 3);
   ClearStats();
   Init();
 }
@@ -549,21 +552,17 @@ void TlsConnectTestBase::SendReceive() {
 
 // Do a first connection so we can do 0-RTT on the second one.
 void TlsConnectTestBase::SetupForZeroRtt() {
+  // If we don't do this, then all 0-RTT attempts will be rejected.
+  SSLInt_RolloverAntiReplay();
+
   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
-  client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_1,
-                           SSL_LIBRARY_VERSION_TLS_1_3);
-  server_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_1,
-                           SSL_LIBRARY_VERSION_TLS_1_3);
+  ConfigureVersion(SSL_LIBRARY_VERSION_TLS_1_3);
   server_->Set0RttEnabled(true);  // So we signal that we allow 0-RTT.
   Connect();
   SendReceive();  // Need to read so that we absorb the session ticket.
   CheckKeys();
 
   Reset();
-  client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_1,
-                           SSL_LIBRARY_VERSION_TLS_1_3);
-  server_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_1,
-                           SSL_LIBRARY_VERSION_TLS_1_3);
   server_->StartConnect();
   client_->StartConnect();
 }
@@ -584,10 +583,6 @@ void TlsConnectTestBase::ZeroRttSendReceive(
     std::function<bool()> post_clienthello_check) {
   const char* k0RttData = "ABCDEF";
   const PRInt32 k0RttDataLen = static_cast<PRInt32>(strlen(k0RttData));
-
-  if (expect_writable && expect_readable) {
-    ExpectAlert(client_, kTlsAlertEndOfEarlyData);
-  }
 
   client_->Handshake();  // Send ClientHello.
   if (post_clienthello_check) {

@@ -19,6 +19,7 @@
 #include "secport.h"
 #include "secerr.h"
 #include "sslerr.h"
+#include "sslexp.h"
 #include "ssl3prot.h"
 #include "hasht.h"
 #include "nssilock.h"
@@ -35,7 +36,10 @@
 
 typedef struct sslSocketStr sslSocket;
 typedef struct ssl3CipherSpecStr ssl3CipherSpec;
+typedef struct sslNamedGroupDefStr sslNamedGroupDef;
+#include "sslexp.h"
 #include "ssl3ext.h"
+#include "sslencode.h"
 
 /* to make some of these old enums public without namespace pollution,
 ** it was necessary to prepend ssl_ to the names.
@@ -160,7 +164,7 @@ typedef enum {
     ticket_allow_psk_sign_auth = 16
 } TLS13SessionTicketFlags;
 
-typedef struct {
+struct sslNamedGroupDefStr {
     /* The name is the value that is encoded on the wire in TLS. */
     SSLNamedGroup name;
     /* The number of bits in the group. */
@@ -172,9 +176,8 @@ typedef struct {
     SECOidTag oidTag;
     /* Assume that the group is always supported. */
     PRBool assumeSupported;
-} sslNamedGroupDef;
+};
 
-typedef struct sslBufferStr sslBuffer;
 typedef struct sslConnectInfoStr sslConnectInfo;
 typedef struct sslGatherStr sslGather;
 typedef struct sslSecurityInfoStr sslSecurityInfo;
@@ -232,15 +235,6 @@ struct sslSocketOpsStr {
 #define ssl_SEND_FLAG_CAP_RECORD_VERSION \
     0x04000000 /* TLS only */
 #define ssl_SEND_FLAG_MASK 0x7f000000
-
-/*
-** A buffer object.
-*/
-struct sslBufferStr {
-    unsigned char *buf;
-    unsigned int len;
-    unsigned int space;
-};
 
 /*
 ** SSL3 cipher suite policy and preference struct.
@@ -528,7 +522,7 @@ struct sslSessionIDStr {
     sslSessionID *next; /* chain used for client sockets, only */
     Cached cached;
     int references;
-    PRUint32 lastAccessTime; /* seconds since Jan 1, 1970 */
+    PRTime lastAccessTime;
 
     /* The rest of the members, except for the members of u.ssl3.locked, may
      * be modified only when the sid is not in any cache.
@@ -546,8 +540,8 @@ struct sslSessionIDStr {
 
     SSL3ProtocolVersion version;
 
-    PRUint32 creationTime;   /* seconds since Jan 1, 1970 */
-    PRUint32 expirationTime; /* seconds since Jan 1, 1970 */
+    PRTime creationTime;
+    PRTime expirationTime;
 
     SSLAuthType authType;
     PRUint32 authKeyBits;
@@ -705,6 +699,7 @@ typedef enum {
 typedef enum {
     idle_handshake,
     wait_client_hello,
+    wait_end_of_early_data,
     wait_client_cert,
     wait_client_key,
     wait_cert_verify,
@@ -761,15 +756,6 @@ typedef enum {
     handshake_hash_record
 } SSL3HandshakeHashType;
 
-/* This holds state for TLS 1.3 CertificateRequest handling. */
-typedef struct TLS13CertificateRequestStr {
-    PLArenaPool *arena;
-    SECItem context;
-    SSLSignatureScheme *signatureSchemes;
-    unsigned int signatureSchemeCount;
-    CERTDistNames ca_list;
-} TLS13CertificateRequest;
-
 /*
 ** This is the "hs" member of the "ssl3" struct.
 ** This entire struct is protected by ssl3HandshakeLock
@@ -798,7 +784,7 @@ typedef struct SSL3HandshakeStateStr {
     unsigned int header_bytes;
     /* number of bytes consumed from handshake */
     /* message for message type and header length */
-    SSL3HandshakeType msg_type;
+    SSLHandshakeType msg_type;
     unsigned long msg_len;
     PRBool isResuming;  /* we are resuming (not used in TLS 1.3) */
     PRBool sendingSCSV; /* instead of empty RI */
@@ -870,22 +856,28 @@ typedef struct SSL3HandshakeStateStr {
     PK11SymKey *serverTrafficSecret;      /* traffic keys */
     PK11SymKey *earlyExporterSecret;      /* for 0-RTT exporters */
     PK11SymKey *exporterSecret;           /* for exporters */
-    /* The certificate request from the server. */
-    TLS13CertificateRequest *certificateRequest;
-    PRCList cipherSpecs;            /* The cipher specs in the sequence they
-                                     * will be applied. */
-    sslZeroRttState zeroRttState;   /* Are we doing a 0-RTT handshake? */
-    sslZeroRttIgnore zeroRttIgnore; /* Are we ignoring 0-RTT? */
-    ssl3CipherSuite zeroRttSuite;   /* The cipher suite we used for 0-RTT. */
-    PRCList bufferedEarlyData;      /* Buffered TLS 1.3 early data
-                                     * on server.*/
-    PRBool helloRetry;              /* True if HelloRetryRequest has been sent
-                                     * or received. */
-    ssl3KEADef kea_def_mutable;     /* Used to hold the writable kea_def
-                                     * we use for TLS 1.3 */
-    PRBool shortHeaders;            /* Assigned if we are doing short headers. */
-    PRBool altHandshakeType;        /* Assigned if we are doing the wrapped handshake. */
+    PRCList cipherSpecs;                  /* The cipher specs in the sequence they
+                                           * will be applied. */
+    sslZeroRttState zeroRttState;         /* Are we doing a 0-RTT handshake? */
+    sslZeroRttIgnore zeroRttIgnore;       /* Are we ignoring 0-RTT? */
+    ssl3CipherSuite zeroRttSuite;         /* The cipher suite we used for 0-RTT. */
+    PRCList bufferedEarlyData;            /* Buffered TLS 1.3 early data
+                                           * on server.*/
+    PRBool helloRetry;                    /* True if HelloRetryRequest has been sent
+                                           * or received. */
+    PRBool clientCertRequested;           /* True if CertificateRequest received. */
+    ssl3KEADef kea_def_mutable;           /* Used to hold the writable kea_def
+                                           * we use for TLS 1.3 */
+    PRTime serverHelloTime;               /* Time the ServerHello flight was sent. */
+    PRUint16 ticketNonce;                 /* A counter we use for tickets. */
+    PRBool altHandshakeType;              /* Alternative ServerHello content type. */
 } SSL3HandshakeState;
+
+#define SSL_ASSERT_HASHES_EMPTY(ss)                                  \
+    do {                                                             \
+        PORT_Assert(ss->ssl3.hs.hashType == handshake_hash_unknown); \
+        PORT_Assert(ss->ssl3.hs.messages.len == 0);                  \
+    } while (0)
 
 /*
 ** This is the "ssl3" struct, as in "ss->ssl3".
@@ -1014,11 +1006,13 @@ typedef struct SessionTicketStr {
     PRBool extendedMasterSecretUsed;
     ClientAuthenticationType client_auth_type;
     SECItem peer_cert;
-    PRUint32 timestamp;
+    PRTime timestamp;
     PRUint32 flags;
     SECItem srvName; /* negotiated server name */
     SECItem alpnSelection;
     PRUint32 maxEarlyData;
+    PRUint32 ticketAgeBaseline;
+    SECItem applicationToken;
 } SessionTicket;
 
 /*
@@ -1153,6 +1147,9 @@ struct sslSocketStr {
     void *pkcs11PinArg;
     SSLNextProtoCallback nextProtoCallback;
     void *nextProtoArg;
+    SSLHelloRetryRequestCallback hrrCallback;
+    void *hrrCallbackArg;
+    PRCList extensionHooks;
 
     PRIntervalTime rTimeout; /* timeout for NSPR I/O */
     PRIntervalTime wTimeout; /* timeout for NSPR I/O */
@@ -1333,11 +1330,6 @@ extern SECStatus ssl_BeginClientHandshake(sslSocket *ss);
 extern SECStatus ssl_BeginServerHandshake(sslSocket *ss);
 extern int ssl_Do1stHandshake(sslSocket *ss);
 
-extern SECStatus sslBuffer_Grow(sslBuffer *b, unsigned int newLen);
-extern SECStatus sslBuffer_Append(sslBuffer *b, const void *data,
-                                  unsigned int len);
-extern void sslBuffer_Clear(sslBuffer *b);
-
 extern void ssl_ChooseSessionIDProcs(sslSecurityInfo *sec);
 
 extern void ssl3_InitCipherSpec(ssl3CipherSpec *spec);
@@ -1370,6 +1362,12 @@ extern void ssl3_RestartHandshakeHashes(sslSocket *ss);
 extern SECStatus ssl3_UpdateHandshakeHashes(sslSocket *ss,
                                             const unsigned char *b,
                                             unsigned int l);
+SECStatus
+ssl_HashHandshakeMessageInt(sslSocket *ss, SSLHandshakeType type,
+                            PRUint32 dtlsSeq,
+                            const PRUint8 *b, PRUint32 length);
+SECStatus ssl_HashHandshakeMessage(sslSocket *ss, SSLHandshakeType type,
+                                   const PRUint8 *b, PRUint32 length);
 
 /* Returns PR_TRUE if we are still waiting for the server to complete its
  * response to our client second round. Once we've received the Finished from
@@ -1585,7 +1583,7 @@ extern PRBool ssl_HaveEphemeralKeyPair(const sslSocket *ss,
                                        const sslNamedGroupDef *groupDef);
 extern void ssl_FreeEphemeralKeyPairs(sslSocket *ss);
 
-extern SECStatus ssl_AppendPaddedDHKeyShare(const sslSocket *ss,
+extern SECStatus ssl_AppendPaddedDHKeyShare(sslBuffer *buf,
                                             const SECKEYPublicKey *pubKey,
                                             PRBool appendLength);
 extern const ssl3DHParams *ssl_GetDHEParams(const sslNamedGroupDef *groupDef);
@@ -1647,6 +1645,10 @@ extern SECStatus ssl_ClientReadVersion(sslSocket *ss, PRUint8 **b,
 extern SECStatus ssl3_NegotiateVersion(sslSocket *ss,
                                        SSL3ProtocolVersion peerVersion,
                                        PRBool allowLargerPeerVersion);
+extern SECStatus ssl_ClientConsumeCipherSuite(sslSocket *ss,
+                                              SSL3ProtocolVersion version,
+                                              PRUint8 **b,
+                                              unsigned int *length);
 
 extern SECStatus ssl_GetPeerInfo(sslSocket *ss);
 
@@ -1662,8 +1664,6 @@ extern SECStatus ssl3_SendECDHServerKeyExchange(sslSocket *ss);
 extern SECStatus ssl_ImportECDHKeyShare(
     sslSocket *ss, SECKEYPublicKey *peerKey,
     PRUint8 *b, PRUint32 length, const sslNamedGroupDef *curve);
-SECStatus tls13_EncodeECDHEKeyShareKEX(const sslSocket *ss,
-                                       const SECKEYPublicKey *pubKey);
 
 extern SECStatus ssl3_ComputeCommonKeyHash(SSLHashType hashAlg,
                                            PRUint8 *hashBuf,
@@ -1672,13 +1672,16 @@ extern SECStatus ssl3_ComputeCommonKeyHash(SSLHashType hashAlg,
 extern void ssl3_DestroyCipherSpec(ssl3CipherSpec *spec, PRBool freeSrvName);
 extern SECStatus ssl3_InitPendingCipherSpec(sslSocket *ss, PK11SymKey *pms);
 extern SECStatus ssl3_AppendHandshake(sslSocket *ss, const void *void_src,
-                                      PRInt32 bytes);
+                                      unsigned int bytes);
 extern SECStatus ssl3_AppendHandshakeHeader(sslSocket *ss,
-                                            SSL3HandshakeType t, PRUint32 length);
-extern SECStatus ssl3_AppendHandshakeNumber(sslSocket *ss, PRInt32 num,
-                                            PRInt32 lenSize);
-extern SECStatus ssl3_AppendHandshakeVariable(sslSocket *ss,
-                                              const PRUint8 *src, PRInt32 bytes, PRInt32 lenSize);
+                                            SSLHandshakeType t, unsigned int length);
+extern SECStatus ssl3_AppendHandshakeNumber(sslSocket *ss, PRUint64 num,
+                                            unsigned int lenSize);
+extern SECStatus ssl3_AppendHandshakeVariable(sslSocket *ss, const PRUint8 *src,
+                                              unsigned int bytes, unsigned int lenSize);
+extern SECStatus ssl3_AppendBufferToHandshake(sslSocket *ss, sslBuffer *buf);
+extern SECStatus ssl3_AppendBufferToHandshakeVariable(sslSocket *ss, sslBuffer *buf,
+                                                      unsigned int lenSize);
 extern SECStatus ssl3_AppendSignatureAndHashAlgorithm(
     sslSocket *ss, const SSLSignatureAndHashAlg *sigAndHash);
 extern SECStatus ssl3_ConsumeHandshake(sslSocket *ss, void *v, PRUint32 bytes,
@@ -1689,8 +1692,6 @@ extern SECStatus ssl3_ConsumeHandshakeNumber(sslSocket *ss, PRUint32 *num,
 extern SECStatus ssl3_ConsumeHandshakeVariable(sslSocket *ss, SECItem *i,
                                                PRUint32 bytes, PRUint8 **b,
                                                PRUint32 *length);
-extern PRUint8 *ssl_EncodeUintX(PRUint64 value, unsigned int bytes,
-                                PRUint8 *to);
 extern PRBool ssl_IsSupportedSignatureScheme(SSLSignatureScheme scheme);
 extern SECStatus ssl_CheckSignatureSchemeConsistency(
     sslSocket *ss, SSLSignatureScheme scheme, CERTCertificate *cert);
@@ -1705,16 +1706,20 @@ extern SECStatus ssl3_SignHashes(sslSocket *ss, SSL3Hashes *hash,
                                  SECKEYPrivateKey *key, SECItem *buf);
 extern SECStatus ssl3_VerifySignedHashes(sslSocket *ss, SSLSignatureScheme scheme,
                                          SSL3Hashes *hash, SECItem *buf);
-extern SECStatus ssl3_CacheWrappedMasterSecret(
-    sslSocket *ss, sslSessionID *sid, ssl3CipherSpec *spec);
+extern SECStatus ssl3_CacheWrappedSecret(sslSocket *ss, sslSessionID *sid,
+                                         PK11SymKey *secret);
 extern void ssl3_FreeSniNameArray(TLSExtensionData *xtnData);
 
 /* Hello Extension related routines. */
 extern void ssl3_SetSIDSessionTicket(sslSessionID *sid,
                                      /*in/out*/ NewSessionTicket *session_ticket);
 SECStatus ssl3_EncodeSessionTicket(sslSocket *ss,
-                                   const NewSessionTicket *ticket_input,
-                                   SECItem *ticket_data);
+                                   const NewSessionTicket *ticket,
+                                   const PRUint8 *appToken,
+                                   unsigned int appTokenLen,
+                                   PK11SymKey *secret, SECItem *ticket_data);
+SECStatus SSLExp_SendSessionTicket(PRFileDesc *fd, const PRUint8 *token,
+                                   unsigned int tokenLen);
 
 SECStatus ssl_MaybeSetSelfEncryptKeyPair(const sslKeyPair *keyPair);
 SECStatus ssl_GetSelfEncryptKeys(sslSocket *ss, unsigned char *keyName,
@@ -1811,11 +1816,12 @@ SECStatus ssl_ReadCertificateStatus(sslSocket *ss, PRUint8 *b,
                                     PRUint32 length);
 SECStatus ssl3_EncodeSigAlgs(const sslSocket *ss, PRUint8 *buf,
                              unsigned maxLen, PRUint32 *len);
-SECStatus ssl_GetCertificateRequestCAs(sslSocket *ss, unsigned int *calenp,
-                                       SECItem **namesp, unsigned int *nnamesp);
+SECStatus ssl_GetCertificateRequestCAs(const sslSocket *ss,
+                                       unsigned int *calenp,
+                                       const SECItem **namesp,
+                                       unsigned int *nnamesp);
 SECStatus ssl3_ParseCertificateRequestCAs(sslSocket *ss, PRUint8 **b,
-                                          PRUint32 *length, PLArenaPool *arena,
-                                          CERTDistNames *ca_list);
+                                          PRUint32 *length, CERTDistNames *ca_list);
 SECStatus ssl3_CompleteHandleCertificateRequest(
     sslSocket *ss, const SSLSignatureScheme *signatureSchemes,
     unsigned int signatureSchemeCount, CERTDistNames *ca_list);
@@ -1834,7 +1840,8 @@ PK11SymKey *ssl3_GetWrappingKey(sslSocket *ss,
                                 PK11SlotInfo *masterSecretSlot,
                                 CK_MECHANISM_TYPE masterWrapMech,
                                 void *pwArg);
-SECStatus ssl3_FillInCachedSID(sslSocket *ss, sslSessionID *sid);
+SECStatus ssl3_FillInCachedSID(sslSocket *ss, sslSessionID *sid,
+                               PK11SymKey *secret);
 const ssl3CipherSuiteDef *ssl_LookupCipherSuiteDef(ssl3CipherSuite suite);
 const ssl3BulkCipherDef *
 ssl_GetBulkCipherDef(const ssl3CipherSuiteDef *cipher_def);
@@ -1849,8 +1856,7 @@ SECOidTag ssl3_HashTypeToOID(SSLHashType hashType);
 SSLHashType ssl_SignatureSchemeToHashType(SSLSignatureScheme scheme);
 KeyType ssl_SignatureSchemeToKeyType(SSLSignatureScheme scheme);
 
-SECStatus ssl3_SetCipherSuite(sslSocket *ss, ssl3CipherSuite chosenSuite,
-                              PRBool initHashes);
+SECStatus ssl3_SetupCipherSuite(sslSocket *ss, PRBool initHashes);
 
 /* Pull in TLS 1.3 functions */
 #include "tls13con.h"
@@ -1863,7 +1869,12 @@ extern void ssl3_CheckCipherSuiteOrderConsistency();
 
 extern int ssl_MapLowLevelError(int hiLevelError);
 
-extern PRUint32 ssl_Time(void);
+extern PRUint32 ssl_TimeSec(void);
+#ifdef UNSAFE_FUZZER_MODE
+#define ssl_TimeUsec() ((PRTime)12345678)
+#else
+#define ssl_TimeUsec() (PR_Now())
+#endif
 extern PRBool ssl_TicketTimeValid(const NewSessionTicket *ticket);
 
 extern void SSL_AtomicIncrementLong(long *x);

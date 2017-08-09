@@ -53,7 +53,7 @@ class TlsRecordHeader : public TlsVersioned {
   size_t header_length() const { return is_dtls() ? 11 : 3; }
 
   // Parse the header; return true if successful; body in an outparam if OK.
-  bool Parse(TlsParser* parser, DataBuffer* body);
+  bool Parse(uint64_t sequence_number, TlsParser* parser, DataBuffer* body);
   // Write the header and body to a buffer at the given offset.
   // Return the offset of the end of the write.
   size_t Write(DataBuffer* buffer, size_t offset, const DataBuffer& body) const;
@@ -66,7 +66,13 @@ class TlsRecordHeader : public TlsVersioned {
 // Abstract filter that operates on entire (D)TLS records.
 class TlsRecordFilter : public PacketFilter {
  public:
-  TlsRecordFilter() : agent_(nullptr), count_(0), cipher_spec_() {}
+  TlsRecordFilter()
+      : agent_(nullptr),
+        count_(0),
+        cipher_spec_(),
+        dropped_record_(false),
+        in_sequence_number_(0),
+        out_sequence_number_(0) {}
 
   void SetAgent(const TlsAgent* agent) { agent_ = agent; }
   const TlsAgent* agent() const { return agent_; }
@@ -115,6 +121,12 @@ class TlsRecordFilter : public PacketFilter {
   const TlsAgent* agent_;
   size_t count_;
   std::unique_ptr<TlsCipherSpec> cipher_spec_;
+  // Whether we dropped a record since the cipher spec changed.
+  bool dropped_record_;
+  // The sequence number we use for reading records as they are written.
+  uint64_t in_sequence_number_;
+  // The sequence number we use for writing modified records.
+  uint64_t out_sequence_number_;
 };
 
 inline std::ostream& operator<<(std::ostream& stream, TlsVersioned v) {
@@ -198,6 +210,8 @@ class TlsInspectorRecordHandshakeMessage : public TlsHandshakeFilter {
                                                const DataBuffer& input,
                                                DataBuffer* output);
 
+  void Reset() { buffer_.Truncate(0); }
+
   const DataBuffer& buffer() const { return buffer_; }
 
  private:
@@ -272,10 +286,15 @@ class TlsExtensionFilter : public TlsHandshakeFilter {
   TlsExtensionFilter() : handshake_types_() {
     handshake_types_.insert(kTlsHandshakeClientHello);
     handshake_types_.insert(kTlsHandshakeServerHello);
+    handshake_types_.insert(kTlsHandshakeEncryptedExtensions);
   }
 
   TlsExtensionFilter(const std::set<uint8_t>& types)
       : handshake_types_(types) {}
+
+  void SetHandshakeTypes(const std::set<uint8_t>& types) {
+    handshake_types_ = types;
+  }
 
   static bool FindExtensions(TlsParser* parser, const HandshakeHeader& header);
 
@@ -422,6 +441,19 @@ class TlsLastByteDamager : public TlsHandshakeFilter {
 
  private:
   uint8_t type_;
+};
+
+class SelectedCipherSuiteReplacer : public TlsHandshakeFilter {
+ public:
+  SelectedCipherSuiteReplacer(uint16_t suite) : cipher_suite_(suite) {}
+
+ protected:
+  PacketFilter::Action FilterHandshake(const HandshakeHeader& header,
+                                       const DataBuffer& input,
+                                       DataBuffer* output) override;
+
+ private:
+  uint16_t cipher_suite_;
 };
 
 }  // namespace nss_test

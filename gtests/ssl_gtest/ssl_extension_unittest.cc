@@ -1009,7 +1009,6 @@ class TlsBogusExtensionTest : public TlsConnectTestBase,
         std::make_shared<TlsExtensionAppender>(message, extension, empty);
     if (version_ >= SSL_LIBRARY_VERSION_TLS_1_3) {
       server_->SetTlsRecordFilter(filter);
-      filter->EnableDecryption();
     } else {
       server_->SetPacketFilter(filter);
     }
@@ -1037,12 +1036,16 @@ class TlsBogusExtensionTest13 : public TlsBogusExtensionTest {
       return;
     }
 
+    FailWithAlert(kTlsAlertUnsupportedExtension);
+  }
+
+  void FailWithAlert(uint8_t alert) {
     client_->StartConnect();
     server_->StartConnect();
     client_->Handshake();  // ClientHello
     server_->Handshake();  // ServerHello
 
-    client_->ExpectSendAlert(kTlsAlertUnsupportedExtension);
+    client_->ExpectSendAlert(alert);
     client_->Handshake();
     if (variant_ == ssl_variant_stream) {
       server_->ExpectSendAlert(kTlsAlertBadRecordMac);
@@ -1067,9 +1070,12 @@ TEST_P(TlsBogusExtensionTest13, AddBogusExtensionCertificate) {
   Run(kTlsHandshakeCertificate);
 }
 
+// It's perfectly valid to set unknown extensions in CertificateRequest.
 TEST_P(TlsBogusExtensionTest13, AddBogusExtensionCertificateRequest) {
   server_->RequestClientAuth(false);
-  Run(kTlsHandshakeCertificateRequest);
+  AddFilter(kTlsHandshakeCertificateRequest, 0xff);
+  FailWithAlert(kTlsAlertDecryptError);
+  client_->CheckErrorCode(SEC_ERROR_BAD_SIGNATURE);
 }
 
 TEST_P(TlsBogusExtensionTest13, AddBogusExtensionHelloRetryRequest) {

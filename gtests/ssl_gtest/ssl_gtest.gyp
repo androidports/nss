@@ -11,6 +11,7 @@
       'target_name': 'ssl_gtest',
       'type': 'executable',
       'sources': [
+        'bloomfilter_unittest.cc',
         'libssl_internals.c',
         'selfencrypt_unittest.cc',
         'ssl_0rtt_unittest.cc',
@@ -18,6 +19,7 @@
         'ssl_auth_unittest.cc',
         'ssl_cert_ext_unittest.cc',
         'ssl_ciphersuite_unittest.cc',
+        'ssl_custext_unittest.cc',
         'ssl_damage_unittest.cc',
         'ssl_dhe_unittest.cc',
         'ssl_drop_unittest.cc',
